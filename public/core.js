@@ -101,6 +101,22 @@
  *
  * 全程解析（停留区间端点由仿射开区间解出），不做任何离散帧抽样。
  *
+ * ---------- 滚动窗口奔走监控（travel load） ----------
+ *
+ * 场景可携带监控配置 travelLoad：{ window:W, distance:D }（W 为滚动窗口
+ * 时长 0<W≤总时长，D 为窗口路程上限 D≥0）。对每位表演者沿分段直线轨迹，
+ * 求每个完整 W 秒窗口 [s, s+W]（s∈[0, T−W]）的**实际行进路程**
+ *
+ *     L(s) = ∫_s^{s+W} |p'(t)| dt = A(s+W) − A(s)
+ *
+ * 其中 A(t) 是沿轨迹的累计弧长——相邻关键帧之间 |p'| 为分段常数，
+ * 首尾停驻（首帧前/末帧后静止）速度为 0、不计路程。L(s) 的斜率仅在
+ * s 或 s+W 越过某个关键帧时刻时变化，故 L(s) 在由"关键帧时刻及其
+ * 前移 W 秒"形成的断点之间是线性函数：枚举断点即可精确求出 L>D 的
+ * 窗口起点范围（**恰等于 D 不违规**）、全程最大窗口路程及其最早起点，
+ * 不做任何固定步长采样。相邻的超限范围自动合并；W 等于总时长时
+ * s 只有 0 一个合法值（结果至多一条零长度范围）。
+ *
  * ---------- 风险叠加时间轴（risk overlay timeline） ----------
  *
  * buildRiskTimeline 复用上述三类分析区间（双人碰撞、表演者×禁入区侵入、
@@ -529,6 +545,9 @@
    * 交接区且间距≤触达距离的连续区间与起始时窗。
    * capacityZones 为规整后的区域限员配置，capacityResults 每项给出
    * 按圆心严格在内部统计的超员时间段（名单变化即分段）与全程峰值人数。
+   * travelLoad 为规整后的滚动窗口奔走监控配置（未配置为 null），
+   * travelResults 每人给出路程严格超过上限的窗口起点范围（相接已合并）
+   * 与全程最大窗口路程及其最早起点（未配置为 null）。
    * riskTimeline 为三类风险（碰撞/禁入区侵入/区域超员）合成为按时间
    * 排序、互不重叠、同刻统一结算的风险段（来源或人员变化即分段）。
    */
@@ -620,6 +639,24 @@
       return analyzeCapacityZone(z, ps, duration);
     });
 
+    // 滚动窗口奔走监控：未配置 travelLoad 时为 null（旧场景完全兼容）；
+    // 配置非法（window/distance）由 normalizeTravelLoad 抛错
+    var travelLoad = normalizeTravelLoad(scene.travelLoad, duration);
+    var travelResults = null;
+    if (travelLoad) {
+      travelResults = ps.map(function (p) {
+        return analyzeTravelLoad(p, travelLoad, duration);
+      });
+      // 超限者按首个超限窗口起点升序（并列按场景次序稳定），无超限者随其后
+      travelResults.sort(function (a, b) {
+        if (a.overloaded !== b.overloaded) return a.overloaded ? -1 : 1;
+        if (a.overloaded && Math.abs(a.firstStart - b.firstStart) > EPS) {
+          return a.firstStart - b.firstStart;
+        }
+        return 0;
+      });
+    }
+
     // 风险叠加时间轴：复用碰撞 / 禁入区侵入 / 区域超员三类区间，
     // 合成为按时间排序、互不重叠、同刻统一结算的风险段
     var riskTimeline = buildRiskTimeline(
@@ -639,6 +676,8 @@
       handoffResults: handoffResults,
       capacityZones: capacityZones,
       capacityResults: capacityResults,
+      travelLoad: travelLoad,
+      travelResults: travelResults,
       riskTimeline: riskTimeline,
       firstObstacleEntry: firstObstacle ? firstObstacle.firstEntry : null,
       firstObstacleConflict: firstObstacle
@@ -1376,6 +1415,206 @@
     return false;
   }
 
+  // ---------- 滚动窗口奔走监控（travel load） ----------
+  //
+  // 监控配置 { window:W, distance:D }：对每位表演者沿分段直线轨迹，
+  // 求每个完整 W 秒窗口 [s, s+W] 的实际行进路程
+  //     L(s) = A(s+W) − A(s)
+  // A(t) 为沿轨迹的累计弧长（buildSegments 已把首尾停驻展开为速度 0
+  // 的段，故首尾静止天然不计路程）。L(s) 的斜率仅在 s 或 s+W 越过某个
+  // 关键帧时刻时变化，断点集合为 {ti, ti−W} ∩ [0, T−W]；每段内 L(s)
+  // 是线性函数，逐段求 L>D 的起点范围（恰等于 D 不计），枚举断点求
+  // 全程最大值与最早起点。全程解析，零采样。
+
+  var TRAVEL_EPS = 1e-7; // 超限严格性 / 同断点去重容差（秒）
+
+  /**
+   * 规整滚动窗口奔走监控配置。
+   * 入参为 null/undefined（或非对象）时返回 null（不启用监控，旧场景
+   * 完全兼容）。启用时：
+   *   window 必须为满足 0 < window ≤ duration 的有限数；
+   *   distance 必须为 ≥ 0 的有限数。
+   * 否则抛出错误（调用方负责向用户给出清晰错误且不覆盖界面上的有效
+   * 设置）。返回 { window, distance }。
+   */
+  function normalizeTravelLoad(load, duration) {
+    if (load === null || load === undefined) return null;
+    var T = Number(duration);
+    if (!(T > 0)) throw new Error('duration 必须为正数');
+    if (typeof load !== 'object') {
+      throw new Error('travelLoad 必须为 {window, distance} 对象');
+    }
+    var W = Number(load.window);
+    var D = Number(load.distance);
+    if (!isFinite(W) || !(W > 0)) {
+      throw new Error('窗口时长 window 必须为正数（秒，0 < W ≤ 总时长）');
+    }
+    if (W > T + TRAVEL_EPS) {
+      throw new Error('窗口时长 window 不能超过总时长（' + T + ' s）');
+    }
+    if (!isFinite(D) || D < 0) {
+      throw new Error('路程上限 distance 必须为非负数');
+    }
+    return { window: Math.min(W, T), distance: Math.max(0, D) };
+  }
+
+  /**
+   * 由已展开的活动段构造累计弧长的分段线性表示：
+   * 返回 { times:[t0,...,tn], dist:[d0,...,dn] }，
+   * dist[k] = 沿轨迹在 [0, times[k]] 上的行进路程。
+   * 段内 |p'|=√(vx²+vy²) 为常数，A(t) 在每段线性增长；速度 0 的
+   * 静止段（含首尾停驻）路程不增长。
+   */
+  function arcLengthTable(segs) {
+    var times = [0];
+    var dist = [0];
+    var acc = 0;
+    segs.forEach(function (s) {
+      if (s.t0 > times[times.length - 1] + EPS) {
+        // 段间未覆盖的理论缝隙（buildSegments 恒无缝覆盖，此为兜底）
+        times.push(s.t0);
+        dist.push(acc);
+      }
+      acc += Math.sqrt(s.vx * s.vx + s.vy * s.vy) * (s.t1 - s.t0);
+      times.push(s.t1);
+      dist.push(acc);
+    });
+    return { times: times, dist: dist };
+  }
+
+  /** 在 arcLengthTable 上线性插值求 A(t)（t 已在 [0,T] 内）。 */
+  function arcLengthAt(table, t) {
+    var times = table.times;
+    var dist = table.dist;
+    if (t <= times[0]) return dist[0];
+    var last = times.length - 1;
+    if (t >= times[last]) return dist[last];
+    var lo = 0;
+    var hi = last;
+    while (hi - lo > 1) {
+      var mid = (lo + hi) >> 1;
+      if (times[mid] <= t) lo = mid; else hi = mid;
+    }
+    var t0 = times[lo];
+    var t1 = times[hi];
+    if (t1 - t0 <= EPS) return dist[hi];
+    var f = (t - t0) / (t1 - t0);
+    return dist[lo] + (dist[hi] - dist[lo]) * f;
+  }
+
+  /**
+   * 计算一位表演者在滚动窗口监控下的奔走分析结果。
+   * performer 与 analyzePair 入参同形（只用到轨迹 keys，与半径无关）。
+   * load 为 normalizeTravelLoad 规整后的 { window, distance }。
+   * 返回 {
+   *   performerId, performerName, window, distance,
+   *   ranges:[{start,end}],   // L(s)>distance 的窗口起点范围（相接已合并），
+   *                           // 端点为 L=D 的精确临界起点，W=T 时可为零长度点
+   *   overloaded,             // ranges 是否非空
+   *   firstStart,             // 首个超限范围起点（无则 null）
+   *   maxDistance,            // 全程最大窗口路程 max_s L(s)
+   *   maxDistanceStart        // 达到最大路程的最早窗口起点（平台取最早）
+   * }
+   */
+  function analyzeTravelLoad(performer, load, duration) {
+    var durationNum = Number(duration);
+    if (!(durationNum > 0)) throw new Error('duration 必须为正数');
+    var W = load.window;
+    var D = load.distance;
+    var S = durationNum - W; // 窗口起点 s 的合法范围 [0, S]
+    var result = {
+      performerId: performer.id,
+      performerName: performer.name || performer.id,
+      window: W,
+      distance: D,
+      ranges: [],
+      overloaded: false,
+      firstStart: null,
+      maxDistance: 0,
+      maxDistanceStart: 0
+    };
+    if (S < -TRAVEL_EPS) return result;
+    S = Math.max(0, S);
+
+    var baseR = Math.max(0, Number(performer.radius) || 0);
+    var segs = buildSegments(performer.keys, durationNum, baseR);
+    var table = arcLengthTable(segs);
+    function L(s) { return arcLengthAt(table, s + W) - arcLengthAt(table, s); }
+
+    // L(s) 的斜率仅在 s 或 s+W 越过关键帧（活动段端点）时变化：
+    // 断点 = {段端点 ti} ∪ {ti − W}，钳到窗口起点域 [0, S]
+    var breaks = [0, S];
+    table.times.forEach(function (ti) {
+      if (ti > TRAVEL_EPS && ti < S - TRAVEL_EPS) breaks.push(ti);
+      var shifted = ti - W;
+      if (shifted > TRAVEL_EPS && shifted < S - TRAVEL_EPS) breaks.push(shifted);
+    });
+    breaks.sort(function (a, b) { return a - b; });
+    var knots = [];
+    breaks.forEach(function (b) {
+      b = clamp(b, 0, S);
+      if (!knots.length || b - knots[knots.length - 1] > TRAVEL_EPS) knots.push(b);
+    });
+
+    // 全程最大路程：L 分段线性，最大值必在断点；同值平台取最早起点
+    var maxDist = -1;
+    var maxStart = 0;
+    knots.forEach(function (s) {
+      var v = L(s);
+      if (v > maxDist + TRAVEL_EPS) {
+        maxDist = v;
+        maxStart = s;
+      }
+    });
+    if (maxDist < 0) maxDist = 0;
+    result.maxDistance = maxDist;
+    result.maxDistanceStart = maxStart;
+
+    // W = T（合法起点只有 s=0）：直接判单点，超限记为零长度范围
+    if (Math.abs(S) <= TRAVEL_EPS) {
+      if (L(0) > D + TRAVEL_EPS) result.ranges.push({ start: 0, end: 0 });
+    } else {
+      // 逐段求 L(s) > D 的起点范围（开条件：恰等于 D 的临界点不违规，
+      // 但作为范围的精确边界返回；相接范围经 mergeIntervals 合并）
+      var raw = [];
+      for (var ki = 0; ki < knots.length - 1; ki++) {
+        var a = knots[ki];
+        var b = knots[ki + 1];
+        if (b - a <= TRAVEL_EPS) continue;
+        var La = L(a);
+        var Lb = L(b);
+        var overA = La > D + TRAVEL_EPS;
+        var overB = Lb > D + TRAVEL_EPS;
+        if (overA && overB) {
+          raw.push([a, b]); // 整段超限
+        } else if (overA || overB) {
+          // 单端超限：线性段内与 D 的唯一交点
+          if (Math.abs(Lb - La) <= EPS) continue;
+          var sc = a + (D - La) * (b - a) / (Lb - La);
+          sc = clamp(sc, a, b);
+          raw.push(overA ? [a, sc] : [sc, b]);
+        }
+      }
+      result.ranges = mergeIntervals(raw).map(function (iv) {
+        return { start: clamp(iv[0], 0, S), end: clamp(iv[1], 0, S) };
+      });
+    }
+
+    result.overloaded = result.ranges.length > 0;
+    result.firstStart = result.overloaded ? result.ranges[0].start : null;
+    return result;
+  }
+
+  /** 查询窗口起点 s 是否落在某表演者的超限起点范围内（供画布/泳道高亮）。 */
+  function isTravelOverAt(travelResult, s) {
+    if (!travelResult || !travelResult.ranges) return false;
+    for (var i = 0; i < travelResult.ranges.length; i++) {
+      var r = travelResult.ranges[i];
+      if (s + TRAVEL_EPS >= r.start && s - TRAVEL_EPS <= r.end) return true;
+    }
+    return false;
+  }
+
   // ---------- 风险叠加时间轴（risk overlay timeline） ----------
   //
   // 复用三类既有分析区间——双人**碰撞**（pairs[].intervals）、
@@ -1887,11 +2126,17 @@
    *  - 另附一个**区域限员**：中央限员区（与交接区同框，语义不同）上限
    *    1 人；甲、乙圆心同时在内部的约 [5.18, 6.82] 为唯一超员段，
    *    峰值 2 人，丙、丁从不进入。
+   *  - 另附**滚动窗口奔走监控**（travelLoad）：窗口 4 s、路程上限 600：
+   *    甲/乙 4 s 窗口恒为 ≈293.3/173.3，不超限；丙折线两段各 ≈651.2，
+   *    超限起点范围约 [0, 4.31]；丁首段 ≈564.0、次段 ≈651.2，超限
+   *    起点范围约 [1.65, 4.31]；两人最大窗口路程均 ≈651.2，最早起点
+   *    分别为 0 与 4 s。
    */
   function builtinScene() {
     return {
       duration: 12,
       world: { width: 1000, height: 600 },
+      travelLoad: { window: 4, distance: 600 },
       obstacles: [
         { id: 'o1', name: '中央禁入区', x: 440, y: 240, width: 120, height: 120 }
       ],
@@ -1993,6 +2238,9 @@
     normalizeCapacityZones: normalizeCapacityZones,
     analyzeCapacityZone: analyzeCapacityZone,
     isCapacityOverAt: isCapacityOverAt,
+    normalizeTravelLoad: normalizeTravelLoad,
+    analyzeTravelLoad: analyzeTravelLoad,
+    isTravelOverAt: isTravelOverAt,
     buildRiskTimeline: buildRiskTimeline,
     isRiskSegmentActive: isRiskSegmentActive,
     compareScenes: compareScenes,

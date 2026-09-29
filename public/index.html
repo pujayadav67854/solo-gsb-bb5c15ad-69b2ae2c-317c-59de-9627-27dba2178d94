@@ -175,6 +175,34 @@
         </div>
       </div>
 
+      <div class="panel panel-travel" id="panel-travel">
+        <div class="panel-head">
+          <span>奔走监控（滚动窗口路程）</span>
+        </div>
+        <div class="travel-fields">
+          <label class="travel-field">
+            窗口时长 W
+            <input id="travel-window" type="number" min="0" step="0.5" />
+            s
+          </label>
+          <label class="travel-field">
+            路程上限 D
+            <input id="travel-distance" type="number" min="0" step="10" />
+          </label>
+          <button id="btn-travel-off" class="btn btn-mini" type="button" title="停用奔走监控（清空 W / D 参数）">停用</button>
+        </div>
+        <div id="travel-error" class="travel-error" hidden></div>
+        <div id="travel-list" class="travel-list"></div>
+        <div id="travel-empty" class="cue-empty" hidden></div>
+        <div class="cue-hint">
+          沿分段直线轨迹计算每个<strong>完整 W 秒窗口</strong>的实际行进路程（首尾停驻不计；
+          按关键帧及其前移 W 秒的断点精确求解，<strong>不做步长采样</strong>）：
+          路程<strong>严格超过 D</strong> 的窗口起点范围相接合并，<strong>恰等于 D 不违规</strong>；
+          W = 总时长时只检查起点 0。<strong>点击范围 / 最大路程跳到对应窗口起点</strong>；
+          修改参数或走位即时刷新，参数随方案快照保存。
+        </div>
+      </div>
+
       <div class="panel panel-snapshots">
         <div class="panel-head">
           <span id="snap-head">方案快照（0/8 · 存于本机浏览器）</span>

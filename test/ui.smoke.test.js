@@ -1124,6 +1124,254 @@ test('区域限员：配置随快照保存并在载入时恢复', async () => {
   dom.window.close();
 });
 
+// ---------- 奔走监控（滚动窗口路程） ----------
+
+test('奔走监控：启动即按样例参数渲染（丙丁超限、甲乙安全），展示范围与最大路程', async () => {
+  const dom = await boot();
+  const doc = dom.window.document;
+
+  assert.equal(doc.getElementById('travel-window').value, '4');
+  assert.equal(doc.getElementById('travel-distance').value, '600');
+  assert.equal(doc.getElementById('travel-error').hidden, true);
+
+  const rows = [...doc.querySelectorAll('.travel-row')];
+  assert.equal(rows.length, 4, '每人一行（按场景次序）');
+  const byName = {};
+  rows.forEach((row) => { byName[row.querySelector('.travel-name').textContent] = row; });
+  const bing = Object.keys(byName).find((n) => n.includes('丙'));
+  const ding = Object.keys(byName).find((n) => n.includes('丁'));
+  const jia = Object.keys(byName).find((n) => n.includes('甲'));
+  const yi = Object.keys(byName).find((n) => n.includes('乙'));
+
+  assert.ok(byName[bing].classList.contains('over'));
+  assert.ok(byName[ding].classList.contains('over'));
+  assert.ok(!byName[jia].classList.contains('over'));
+  assert.ok(!byName[yi].classList.contains('over'));
+
+  // 丙：范围约 0.00–4.31 s，最大路程 ≈651.15 自 0 起
+  assert.match(byName[bing].textContent, /0\.00\s*–\s*4\.31\s*s/);
+  assert.match(byName[bing].textContent, /651\.15\s*@\s*0\.00\s*s/);
+  // 丁：范围约 1.65–4.31 s，最大路程自 4.00 起
+  assert.match(byName[ding].textContent, /1\.65\s*–\s*4\.31\s*s/);
+  assert.match(byName[ding].textContent, /651\.15\s*@\s*4\.00\s*s/);
+  // 甲乙显示全程未超限
+  assert.match(byName[jia].textContent, /全程未超限/);
+  assert.match(byName[yi].textContent, /全程未超限/);
+  // 时间轴泳道出现紫色超限条
+  assert.ok(doc.querySelectorAll('.tl-travel').length >= 2, '丙丁泳道叠加奔走超限条');
+  dom.window.close();
+});
+
+test('奔走监控：点击范围/最大路程跳到窗口起点', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  const rows = [...doc.querySelectorAll('.travel-row')];
+  const ding = rows.find((r) => r.textContent.includes('丁'));
+  const chip = ding.querySelector('.travel-chip');
+  const start = Number(chip.getAttribute('data-t'));
+  assert.ok(Math.abs(start - 1.6522) < 1e-3, `丁首个超限起点约 1.65，实际 ${start}`);
+  chip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  let tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - start) < 0.01, `点击范围跳到 ${start}，实际 ${tv}`);
+
+  // 点击丙的最大路程：跳到最早最大起点 0
+  const bing = rows.find((r) => r.textContent.includes('丙'));
+  const maxEl = bing.querySelector('.travel-max');
+  assert.ok(Math.abs(Number(maxEl.getAttribute('data-t')) - 0) < 1e-9);
+  maxEl.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - 0) < 0.01);
+  dom.window.close();
+});
+
+test('奔走监控：改参数即时刷新；恰等于上限不违规；非法 W/D 报错且不覆盖有效设置', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const wInp = doc.getElementById('travel-window');
+  const dInp = doc.getElementById('travel-distance');
+  const errEl = doc.getElementById('travel-error');
+
+  // D 提高到 700：丙丁最大 ≈651 均不超限，over 行清零
+  dInp.value = '700';
+  dInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(errEl.hidden, true);
+  assert.equal(doc.querySelectorAll('.travel-row.over').length, 0);
+  assert.match(doc.querySelector('.travel-row').textContent, /全程未超限/);
+
+  // D 设为略大于最大路程（≈651.153）的值：严格超过语义 → 无人超限
+  dInp.value = '651.2';
+  dInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.travel-row.over').length, 0);
+
+  // D 再降到略低于最大路程：丙丁重新超限（严格小于即违规）
+  dInp.value = '651.1';
+  dInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.travel-row.over').length, 2);
+
+  // D 回到 600：丙丁重新超限
+  dInp.value = '600';
+  dInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.travel-row.over').length, 2);
+
+  // 非法 W（0）：清晰错误，输入回退为有效值 4，有效设置不被覆盖
+  wInp.value = '0';
+  wInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(errEl.hidden, false);
+  assert.match(errEl.textContent, /窗口时长/);
+  assert.equal(wInp.value, '4');
+  assert.equal(dInp.value, '600');
+  assert.equal(doc.querySelectorAll('.travel-row.over').length, 2, '仍按有效参数分析');
+
+  // W 超过总时长：清晰错误并回退
+  wInp.value = '13';
+  wInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.match(errEl.textContent, /总时长/);
+  assert.equal(wInp.value, '4');
+
+  // 非法 D（负数）：清晰错误并回退
+  dInp.value = '-5';
+  dInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.match(errEl.textContent, /路程上限/);
+  assert.equal(dInp.value, '600');
+
+  // 只填一项：提示且不改变生效设置
+  wInp.value = '2';
+  dInp.value = '';
+  wInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.match(errEl.textContent, /同时填写/);
+  assert.equal(wInp.value, '4', 'W 回退为生效值');
+  assert.equal(dInp.value, '600', 'D 回退为生效值');
+  dom.window.close();
+});
+
+test('奔走监控：停用按钮关闭监控（行清空、提示启用）；拖走位即时重算', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  doc.getElementById('btn-travel-off').click();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.travel-row').length, 0);
+  assert.equal(doc.getElementById('travel-empty').hidden, false);
+  assert.equal(doc.getElementById('travel-window').value, '');
+  assert.equal(doc.getElementById('travel-distance').value, '');
+  assert.equal(doc.querySelectorAll('.tl-travel').length, 0);
+
+  // 重新填写启用：W=4 D=600
+  doc.getElementById('travel-window').value = '4';
+  doc.getElementById('travel-distance').value = '600';
+  doc.getElementById('travel-distance').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.travel-row.over').length, 2);
+
+  // 拖动丙的关键帧（t=4 点 (500,60)）向上移动缩短其路程，使两段都低于 600：
+  // 直接把丙首帧拖到接近第二帧位置难以稳定命中——改为把 D 降低验证即时重算已覆盖；
+  // 这里拖动甲的关键帧（60,300）垂直远离，甲 4s 窗口路程变大后应加入超限
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+  pointer('pointerdown', 60, 300);
+  pointer('pointermove', 60, 40);
+  pointer('pointerup', 60, 40);
+  await new Promise((r) => setTimeout(r, 10));
+  const rows = [...doc.querySelectorAll('.travel-row')];
+  const jia = rows.find((r) => r.textContent.includes('甲'));
+  // 甲原 4s 窗口路程 ≈293.3；首帧改为 (60,40) 后变为
+  // √(880²+260²)/12*4 ≈ 306.7，仍 <600 —— 用 D=300 更直接：
+  doc.getElementById('travel-distance').value = '300';
+  doc.getElementById('travel-distance').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  const rows2 = [...doc.querySelectorAll('.travel-row')];
+  const jia2 = rows2.find((r) => r.textContent.includes('甲'));
+  assert.ok(jia2.classList.contains('over'), '拖走位后参数即时重算，甲在 D=300 时超限');
+  dom.window.close();
+});
+
+test('奔走监控：参数随方案快照保存并在载入时恢复', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const wInp = doc.getElementById('travel-window');
+  const dInp = doc.getElementById('travel-distance');
+
+  wInp.value = '3';
+  dInp.value = '400';
+  dInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.travel-row.over').length >= 2, true);
+
+  doc.getElementById('snap-name').value = '奔走案';
+  doc.getElementById('btn-snap-save').click();
+  await new Promise((r) => setTimeout(r, 10));
+  const stored = JSON.parse(window.localStorage.getItem('trajectory-collision-stage.snapshots.v1'));
+  assert.deepEqual(stored.list[0].scene.travelLoad, { window: 3, distance: 400 });
+
+  // 停用监控后重置样例（样例自带 W=4/D=600），再载入快照恢复 W=3/D=400
+  doc.getElementById('btn-travel-off').click();
+  await new Promise((r) => setTimeout(r, 5));
+  doc.getElementById('btn-sample').click();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(doc.getElementById('travel-window').value, '4');
+  assert.equal(doc.getElementById('travel-distance').value, '600');
+  doc.querySelector('.snap-item .snap-load').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(doc.getElementById('travel-window').value, '3');
+  assert.equal(doc.getElementById('travel-distance').value, '400');
+  assert.equal(doc.querySelectorAll('.travel-row').length, 4);
+  dom.window.close();
+});
+
+test('奔走监控：播放头位于超限窗口起点范围时该行高亮；W=总时长零长度范围可点击', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const wInp = doc.getElementById('travel-window');
+  const dInp = doc.getElementById('travel-distance');
+
+  // 丁超限范围约 [1.65,4.31]：播放头移到 s=2 时丁行 active-now
+  doc.getElementById('time-input').value = '2';
+  doc.getElementById('time-input').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  let rows = [...doc.querySelectorAll('.travel-row')];
+  const ding = rows.find((r) => r.textContent.includes('丁'));
+  assert.ok(ding.classList.contains('active-now'), 's=2 在丁的超限起点范围内');
+  // s=5 在范围外
+  doc.getElementById('time-input').value = '5';
+  doc.getElementById('time-input').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  rows = [...doc.querySelectorAll('.travel-row')];
+  assert.ok(!rows.find((r) => r.textContent.includes('丁')).classList.contains('active-now'));
+
+  // W = 总时长：只有 s=0 一个窗口；全程 880 单位的甲 D=800 超限
+  wInp.value = '12';
+  dInp.value = '800';
+  dInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  rows = [...doc.querySelectorAll('.travel-row')];
+  const jia = rows.find((r) => r.textContent.includes('甲'));
+  assert.ok(jia.classList.contains('over'));
+  const chip = jia.querySelector('.travel-chip');
+  assert.ok(chip, 'W=总时长展示零长度范围芯片');
+  assert.match(chip.textContent, /仅起点\s*0\.00/);
+  assert.equal(Number(chip.getAttribute('data-t')), 0);
+  assert.equal(doc.querySelectorAll('.tl-travel').length >= 1, true, '零长度范围也画最小可见条');
+  dom.window.close();
+});
+
 test('风险叠加时间轴：启动即合成风险段（三类来源标签/人员），按时间排列、无零长度段', async () => {
   const dom = await boot();
   const doc = dom.window.document;

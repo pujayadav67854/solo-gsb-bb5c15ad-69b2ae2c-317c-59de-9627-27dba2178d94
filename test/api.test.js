@@ -670,3 +670,137 @@ test('POST /api/analyze：无风险场景 riskTimeline 为空；旧请求字段�
   assert.equal(r.status, 200);
   assert.deepEqual(r.json.riskTimeline, []);
 });
+
+test('POST /api/analyze：缺省 travelLoad 的旧请求保持原有分析行为（字段为 null）', async () => {
+  const r = await postAnalyze({
+    duration: 10,
+    performers: [
+      { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 100, y: 0 }] },
+      { id: 'b', radius: 0, keys: [{ t: 0, x: 100, y: 0 }, { t: 10, x: 0, y: 0 }] }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.travelLoad, null);
+  assert.equal(r.json.travelResults, null);
+  assert.equal(r.json.scene.travelLoad, null);
+  // 其它分析字段照常返回
+  assert.equal(r.json.pairCount, 1);
+});
+
+test('POST /api/analyze：travelLoad=null 等价于未配置', async () => {
+  const r = await postAnalyze({
+    duration: 10,
+    travelLoad: null,
+    performers: [
+      { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 0 }] },
+      { id: 'b', radius: 0, keys: [{ t: 0, x: 100, y: 0 }] }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.travelLoad, null);
+  assert.equal(r.json.travelResults, null);
+});
+
+test('POST /api/analyze：接受 travelLoad 并返回每人超限范围 / 最大路程', async () => {
+  const r = await postAnalyze({
+    duration: 10,
+    travelLoad: { window: 2, distance: 150 },
+    performers: [
+      { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 1000, y: 0 }] },
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 0, y: 0 }] }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.travelLoad, { window: 2, distance: 150 });
+  assert.deepEqual(r.json.scene.travelLoad, { window: 2, distance: 150 });
+  assert.equal(r.json.travelResults.length, 2);
+  // 甲匀速 100/s：每窗 200，超限范围 [0,8]
+  const a = r.json.travelResults.find((x) => x.performerId === 'a');
+  assert.equal(a.overloaded, true);
+  assert.equal(a.ranges.length, 1);
+  assert.ok(Math.abs(a.ranges[0].start - 0) < 1e-9);
+  assert.ok(Math.abs(a.ranges[0].end - 8) < 1e-9);
+  assert.ok(Math.abs(a.maxDistance - 200) < 1e-9);
+  assert.ok(Math.abs(a.maxDistanceStart - 0) < 1e-9);
+  // 乙静止：不超限
+  const b = r.json.travelResults.find((x) => x.performerId === 'b');
+  assert.equal(b.overloaded, false);
+  assert.deepEqual(b.ranges, []);
+  assert.equal(b.firstStart, null);
+  assert.ok(Math.abs(b.maxDistance - 0) < 1e-9);
+  // 超限者排在前
+  assert.equal(r.json.travelResults[0].performerId, 'a');
+});
+
+test('POST /api/analyze：路程恰等于上限不违规；W=总时长只检查起点 0', async () => {
+  const body = {
+    duration: 10,
+    performers: [
+      { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 1000, y: 0 }] },
+      { id: 'b', radius: 0, keys: [{ t: 0, x: 50, y: 50 }, { t: 10, x: 50, y: 50 }] }
+    ]
+  };
+  const exact = await postAnalyze(Object.assign({ travelLoad: { window: 2, distance: 200 } }, body));
+  assert.equal(exact.status, 200);
+  exact.json.travelResults.forEach((tr) => assert.equal(tr.overloaded, false));
+
+  const fullW = await postAnalyze(Object.assign({ travelLoad: { window: 10, distance: 1000 } }, body));
+  assert.equal(fullW.status, 200);
+  fullW.json.travelResults.forEach((tr) => assert.equal(tr.overloaded, false));
+
+  const fullWOver = await postAnalyze(Object.assign({ travelLoad: { window: 10, distance: 999 } }, body));
+  assert.equal(fullWOver.status, 200);
+  const a = fullWOver.json.travelResults.find((x) => x.performerId === 'a');
+  assert.equal(a.overloaded, true);
+  assert.equal(a.ranges.length, 1);
+  assert.ok(Math.abs(a.ranges[0].start - 0) < 1e-9);
+  assert.ok(Math.abs(a.ranges[0].end - 0) < 1e-9, 'W=总时长时为零长度范围');
+});
+
+test('POST /api/analyze：非法 travelLoad（W / D / 类型）返回清晰 400 且不分析', async () => {
+  const performers = [
+    { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 0 }] },
+    { id: 'b', radius: 0, keys: [{ t: 0, x: 100, y: 0 }] }
+  ];
+  const cases = [
+    [{ window: 0, distance: 1 }, /window/],
+    [{ window: -2, distance: 1 }, /window/],
+    [{ window: 'abc', distance: 1 }, /window/],
+    [{ window: 10.5, distance: 1 }, /总时长/],
+    [{ window: 2 }, /distance/],
+    [{ window: 2, distance: -1 }, /distance/],
+    [{ window: 2, distance: 'x' }, /distance/]
+  ];
+  for (const [travelLoad, re] of cases) {
+    const r = await postAnalyze({ duration: 10, travelLoad, performers });
+    assert.equal(r.status, 400, `配置 ${JSON.stringify(travelLoad)} 应 400`);
+    assert.match(r.json.error, re);
+  }
+  const rArr = await postAnalyze({ duration: 10, travelLoad: [], performers });
+  assert.equal(rArr.status, 400);
+  assert.match(rArr.json.error, /travelLoad/);
+});
+
+test('GET /api/sample：样例携带 travelLoad，回传分析与界面同一结果（丙丁超限）', async () => {
+  const s = await getJson('/api/sample');
+  assert.equal(s.status, 200);
+  assert.deepEqual(s.json.travelLoad, { window: 4, distance: 600 });
+  const r = await postAnalyze({
+    duration: s.json.duration,
+    performers: s.json.performers,
+    obstacles: s.json.obstacles,
+    handoffs: s.json.handoffs,
+    capacityZones: s.json.capacityZones,
+    travelLoad: s.json.travelLoad
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.travelLoad, { window: 4, distance: 600 });
+  assert.equal(r.json.travelResults.length, 4);
+  assert.equal(r.json.travelResults[0].overloaded, true, '超限者按 firstStart 升序在前');
+  const byName = {};
+  r.json.travelResults.forEach((tr) => { byName[tr.performerName] = tr; });
+  assert.equal(byName['甲·横贯'].overloaded, false);
+  assert.equal(byName['乙·纵穿'].overloaded, false);
+  assert.equal(byName['丙·错峰展伞'].overloaded, true);
+  assert.equal(byName['丁·跟进'].overloaded, true);
+});
