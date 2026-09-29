@@ -670,3 +670,98 @@ test('POST /api/analyze：无风险场景 riskTimeline 为空；旧请求字段�
   assert.equal(r.status, 200);
   assert.deepEqual(r.json.riskTimeline, []);
 });
+
+// ---------- 滚动窗口奔波负荷（travel） ----------
+
+const travelScene = (overrides) => Object.assign({
+  duration: 10,
+  performers: [
+    // 甲 10s 匀速走 1000 单位（100/s）：任意 4s 窗口路程 400
+    { id: 'a', name: '甲', radius: 5, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 1000, y: 0 }] },
+    // 乙 10s 匀速走 100 单位（10/s）：任意 4s 窗口路程 40
+    { id: 'b', name: '乙', radius: 5, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 100, y: 0 }] }
+  ],
+  travel: { windowSeconds: 4, distanceLimit: 200 }
+}, overrides || {});
+
+test('POST /api/analyze：travel 缺省时返回 null，旧请求保持原有分析行为', async () => {
+  const body = travelScene();
+  delete body.travel;
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.travel, null);
+  assert.equal(r.json.scene.travel, null);
+  // 其它既有分析结果不受影响
+  assert.equal(r.json.pairCount, 1);
+});
+
+test('POST /api/analyze：接受 travel 并返回逐人滚动窗口奔波结果', async () => {
+  const r = await postAnalyze(travelScene());
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.travel.config, { windowSeconds: 4, distanceLimit: 200 });
+  assert.deepEqual(r.json.scene.travel, { windowSeconds: 4, distanceLimit: 200 });
+  assert.equal(r.json.travel.travelResults.length, 2);
+  const a = r.json.travel.travelResults.find((x) => x.performerId === 'a');
+  const b = r.json.travel.travelResults.find((x) => x.performerId === 'b');
+  assert.equal(a.overloaded, true);
+  assert.equal(a.ranges.length, 1);
+  assert.ok(Math.abs(a.ranges[0].start - 0) < 1e-9);
+  assert.ok(Math.abs(a.ranges[0].end - 6) < 1e-9);
+  assert.ok(Math.abs(a.ranges[0].maxDistance - 400) < 1e-9);
+  assert.ok(Math.abs(a.maxDistance - 400) < 1e-9);
+  assert.ok(Math.abs(a.maxStart - 0) < 1e-9);
+  assert.equal(b.overloaded, false);
+  assert.deepEqual(b.ranges, []);
+  assert.ok(Math.abs(b.maxDistance - 40) < 1e-9);
+  // 场景级最大路程当事人
+  assert.ok(Math.abs(r.json.travel.maxDistance - 400) < 1e-9);
+  assert.equal(r.json.travel.maxDistancePerformerId, 'a');
+});
+
+test('POST /api/analyze：W 等于总时长时只检查起点 0', async () => {
+  const r = await postAnalyze(travelScene({ travel: { windowSeconds: 10, distanceLimit: 500 } }));
+  assert.equal(r.status, 200);
+  const a = r.json.travel.travelResults.find((x) => x.performerId === 'a');
+  assert.equal(a.overloaded, true);
+  assert.deepEqual([a.ranges[0].start, a.ranges[0].end], [0, 0]);
+  assert.ok(Math.abs(a.maxDistance - 1000) < 1e-9);
+});
+
+test('POST /api/analyze：恰等于路程上限不违规', async () => {
+  // 甲任意 4s 窗口恰为 400：D=400 不超限；D=399.999 超限
+  const eq = await postAnalyze(travelScene({ travel: { windowSeconds: 4, distanceLimit: 400 } }));
+  assert.equal(eq.status, 200);
+  const aEq = eq.json.travel.travelResults.find((x) => x.performerId === 'a');
+  assert.equal(aEq.overloaded, false);
+  assert.deepEqual(aEq.ranges, []);
+});
+
+test('POST /api/analyze：非法 travel（W/D）返回清晰 400 且不执行分析', async () => {
+  const bads = [
+    [{ windowSeconds: 0, distanceLimit: 10 }, /windowSeconds 必须为正数/],
+    [{ windowSeconds: -4, distanceLimit: 10 }, /windowSeconds 必须为正数/],
+    [{ windowSeconds: 'x', distanceLimit: 10 }, /windowSeconds 必须为正数/],
+    [{ windowSeconds: 10.001, distanceLimit: 10 }, /不能超过总时长/],
+    [{ windowSeconds: 4, distanceLimit: -1 }, /distanceLimit 必须为非负/],
+    [{ windowSeconds: 4 }, /distanceLimit 必须为非负/],
+    [{ distanceLimit: 10 }, /windowSeconds 必须为正数/],
+    ['not-object', /travel 必须为对象/],
+    [[], /travel 必须为对象/]
+  ];
+  for (const [cfg, re] of bads) {
+    const r = await postAnalyze(travelScene({ travel: cfg }));
+    assert.equal(r.status, 400, `cfg=${JSON.stringify(cfg)} 应 400`);
+    assert.match(r.json.error, re, `cfg=${JSON.stringify(cfg)} 错误信息`);
+    assert.equal(r.json.travel, undefined, '400 不返回分析结果');
+  }
+});
+
+test('GET /api/sample：样例携带 travel 参数（W=4、D=500）', async () => {
+  const s = await getJson('/api/sample');
+  assert.equal(s.status, 200);
+  assert.deepEqual(s.json.travel, { windowSeconds: 4, distanceLimit: 500 });
+  const r = await postAnalyze(s.json);
+  assert.equal(r.status, 200);
+  assert.ok(r.json.travel);
+  assert.equal(r.json.travel.travelResults.length, 4);
+});

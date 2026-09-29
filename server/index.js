@@ -28,9 +28,12 @@ app.get('/api/sample', (_req, res) => {
  * 限员区域经同一规整（缺省 id 补全、尺寸钳非负、人数上限为正整数），
  * 便于集成方直接消费。
  */
-function resolveScene(duration, performers, obstacles, handoffs, capacityZones) {
+function resolveScene(duration, performers, obstacles, handoffs, capacityZones, travel) {
   return {
     duration: duration,
+    travel: travel
+      ? core.normalizeTravel(travel, duration)
+      : null,
     obstacles: core.normalizeObstacles(obstacles),
     handoffs: core.normalizeHandoffs(handoffs, duration),
     capacityZones: core.normalizeCapacityZones(capacityZones),
@@ -62,6 +65,7 @@ function resolveScene(duration, performers, obstacles, handoffs, capacityZones) 
  *   obstacles?:[{id?,name?,x,y,width,height}],   // 舞台禁入矩形（可空/缺省）
  *   handoffs?:[{id?,aId,bId,x,y,width,height,reach,minDuration}]  // 道具交接（可空/缺省）
  *   capacityZones?:[{id?,name?,x,y,width,height,limit}] // 区域限员（正整数上限，可空/缺省）
+ *   travel?:{windowSeconds:W, distanceLimit:D} // 滚动窗口奔波负荷（0<W≤duration、D≥0，可缺省）
  * }
  * 关键帧 r 为可选安全半径（开伞/展开道具），缺省继承表演者 radius。
  * cues 为按顺序排列的入场口令（入口矩形 + 允许进入时窗，时窗缺省为
@@ -81,12 +85,19 @@ function resolveScene(duration, performers, obstacles, handoffs, capacityZones) 
  * 按时间排序、互不重叠的风险段（同刻开始与结束统一结算、舍弃零长度
  * 段、生效风险来源或涉及人员变化即分段），每段给出起止时刻、来源
  * （类型 + 标签 + 来源内人员）与涉及人员并集，供前端侧栏展示与跳转。
+ * travel 为滚动窗口奔波负荷参数 {windowSeconds:W, distanceLimit:D}
+ * （0<W≤duration、D≥0）：窗口起点在 [0,duration−W] 上连续滑动，按
+ * 关键帧断点精确求每人实际行进路程严格超过 D 的窗口起点范围（相接范围
+ * 合并，恰等于 D 不违规，首尾停驻不计路程，W=duration 时只查起点 0），
+ * travelResults 逐人给出范围（含范围最大路程及最早起点）、全程最大
+ * 路程与最早起点；参数非法返回 400；整体缺省 travel 的旧请求保持原
+ * 分析行为（travel 字段为 null）。
  * 每对返回精确碰撞区间与最小安全余量 minMargin/minMarginT
  * （distance(t)-(rA+rB) 的连续全局最小值及发生时刻），pairs 按余量升序；
  * obstacleConflicts 为每位表演者 × 每个禁入矩形的精确侵入区间，按首次
  * 进入时刻升序；场景级另附 minMargin/minMarginT/minMarginPair 与
  * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/cues/
- * handoffs/capacityZones）完全兼容。
+ * handoffs/capacityZones/travel）完全兼容。
  */
 app.post('/api/analyze', (req, res) => {
   try {
@@ -96,6 +107,7 @@ app.post('/api/analyze', (req, res) => {
     const rawObstacles = scene.obstacles;
     const rawHandoffs = scene.handoffs;
     const rawCapacityZones = scene.capacityZones;
+    const rawTravel = scene.travel;
 
     if (!(duration > 0) || !isFinite(duration)) {
       return res.status(400).json({ error: 'duration 必须为正数（秒）' });
@@ -111,6 +123,31 @@ app.post('/api/analyze', (req, res) => {
     }
     if (rawCapacityZones !== undefined && rawCapacityZones !== null && !Array.isArray(rawCapacityZones)) {
       return res.status(400).json({ error: 'capacityZones 必须为数组' });
+    }
+
+    // 滚动窗口奔波负荷参数校验（整体缺省即旧请求，保持原分析行为）；
+    // 非法 W / D 直接 400，不进入分析
+    let travel = null;
+    if (rawTravel !== undefined && rawTravel !== null) {
+      if (typeof rawTravel !== 'object' || Array.isArray(rawTravel)) {
+        return res.status(400).json({ error: 'travel 必须为对象 {windowSeconds, distanceLimit}' });
+      }
+      const W = Number(rawTravel.windowSeconds);
+      const D = Number(rawTravel.distanceLimit);
+      if (rawTravel.windowSeconds === undefined || rawTravel.windowSeconds === null ||
+          rawTravel.windowSeconds === '' || !isFinite(W) || !(W > 0)) {
+        return res.status(400).json({
+          error: `滚动窗口时长 windowSeconds 必须为正数（0 < W ≤ 总时长 ${duration} 秒）`
+        });
+      }
+      if (W > duration + 1e-7) {
+        return res.status(400).json({ error: `滚动窗口时长 windowSeconds 不能超过总时长 ${duration} 秒` });
+      }
+      if (rawTravel.distanceLimit === undefined || rawTravel.distanceLimit === null ||
+          rawTravel.distanceLimit === '' || !isFinite(D) || D < 0) {
+        return res.status(400).json({ error: '路程上限 distanceLimit 必须为非负数' });
+      }
+      travel = { windowSeconds: W, distanceLimit: D };
     }
 
     performers.forEach((p, idx) => {
@@ -235,9 +272,16 @@ app.post('/api/analyze', (req, res) => {
     const obstacles = core.normalizeObstacles(rawObstacles);
     const handoffs = core.normalizeHandoffs(rawHandoffs, duration);
     const capacityZones = core.normalizeCapacityZones(rawCapacityZones);
-    const result = core.analyzeScene({ duration, performers, obstacles, handoffs, capacityZones });
+    const result = core.analyzeScene({
+      duration,
+      performers,
+      obstacles,
+      handoffs,
+      capacityZones,
+      travel
+    });
     res.json(Object.assign(
-      { scene: resolveScene(duration, performers, obstacles, handoffs, capacityZones) },
+      { scene: resolveScene(duration, performers, obstacles, handoffs, capacityZones, travel) },
       result
     ));
   } catch (err) {

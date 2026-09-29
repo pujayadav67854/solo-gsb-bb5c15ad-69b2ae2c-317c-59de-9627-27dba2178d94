@@ -110,6 +110,22 @@
  * 事件组之间"生效来源集合 + 涉及人员并集"恒定即一个风险段，来源或
  * 人员变化立即分段；段按起点升序、互不重叠，段内来源按碰撞→禁入侵入
  * →区域超员排列，人员按场景次序去重。浏览器侧栏与 /api/analyze 共用。
+ *
+ * ---------- 滚动窗口奔波负荷（rolling-window travel load） ----------
+ *
+ * 场景可携带一组奔波负荷参数 travel：
+ *   { windowSeconds: W, distanceLimit: D }
+ * 其中 0 < W ≤ 总时长、D ≥ 0。窗口起点 s 在 [0, 总时长−W] 上**连续滑动**，
+ * 对每位表演者计算窗口 [s, s+W] 内沿分段直线轨迹的**实际行进路程**
+ * （首尾停驻段速度为 0，天然不计路程）：
+ *
+ *     F(s) = Σ_i |v_i| · |[t_i, t_{i+1}] ∩ [s, s+W]|
+ *
+ * F(s) 关于 s 分段线性：只有当窗口左沿/右沿越过某关键帧时刻（t_i 或
+ * t_i−W）时斜率才改变，因此枚举这些断点即可在每个断点区间内用线性求根
+ * **精确**给出 F(s) > D（严格大于；恰等于 D 不违规）的起点范围，相邻
+ * 范围经 mergeIntervals 合并——全程不做固定步长采样。W 等于总时长时
+ * 起点域退化为 {0}，只检查起点 0。浏览器侧栏与 /api/analyze 共用。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -531,6 +547,9 @@
    * 按圆心严格在内部统计的超员时间段（名单变化即分段）与全程峰值人数。
    * riskTimeline 为三类风险（碰撞/禁入区侵入/区域超员）合成为按时间
    * 排序、互不重叠、同刻统一结算的风险段（来源或人员变化即分段）。
+   * travel 存在且合法时另附滚动窗口奔波负荷分析（travelResults：每人
+   * 的超限窗口起点范围/范围最大路程/全程最大路程及最早起点；缺省为 null，
+   * 旧场景分析行为不变）。
    */
   function analyzeScene(scene) {
     var duration = Number(scene.duration);
@@ -628,6 +647,13 @@
       duration
     );
 
+    // 滚动窗口奔波负荷：仅在携带合法 travel 参数时分析；缺省（旧场景）
+    // 返回 null，保持既有分析行为完全不变
+    var travel = null;
+    if (scene.travel !== undefined && scene.travel !== null) {
+      travel = analyzeTravel(scene, normalizeTravel(scene.travel, duration));
+    }
+
     return {
       duration: duration,
       pairCount: pairs.length,
@@ -640,6 +666,7 @@
       capacityZones: capacityZones,
       capacityResults: capacityResults,
       riskTimeline: riskTimeline,
+      travel: travel,
       firstObstacleEntry: firstObstacle ? firstObstacle.firstEntry : null,
       firstObstacleConflict: firstObstacle
         ? [firstObstacle.performerId, firstObstacle.obstacleId]
@@ -1593,6 +1620,222 @@
     return t + RISK_EPS >= seg.start && t - RISK_EPS <= seg.end;
   }
 
+  // ---------- 滚动窗口奔波负荷（rolling-window travel load） ----------
+  //
+  // 参数 { windowSeconds: W, distanceLimit: D }（0 < W ≤ 总时长、D ≥ 0）。
+  // 窗口起点 s 连续扫过 [0, T−W]，窗口 [s, s+W] 内的实际行进路程为
+  //
+  //   F(s) = Σ_i speed_i · overlap_i(s)
+  //
+  // （每个活动段速度大小 speed_i 恒定；overlap_i(s) 为该段与窗口的重叠
+  // 时长，是 s 的分段线性函数）。关键帧时刻 t 与 t−W 是 overlap 的唯一
+  // 折点，故 F 在这些断点之间斜率恒定：枚举断点、在每个线性小区间上精确
+  // 解 F(s) > D（严格大于，等于 D 不违规），相邻范围合并，不做固定步长
+  // 采样。W = T 时起点域只有 {0}。首尾停驻段 speed = 0，不计路程。
+
+  var TRAVEL_EPS = 1e-7; // 严格超限判定 / 断点去重容差（秒）
+
+  /**
+   * 规整奔波负荷参数：windowSeconds 必须为有限正数且 ≤ duration；
+   * distanceLimit 必须为有限非负数。任一不满足即抛出带清晰说明的错误
+   * （由调用方在界面回退输入框、在 HTTP 层转 400，均不覆盖既有有效值）。
+   * 返回 { windowSeconds, distanceLimit }。
+   */
+  function normalizeTravel(travel, duration) {
+    var T = Number(duration);
+    if (!(T > 0) || !isFinite(T)) throw new Error('duration 必须为正数');
+    if (!travel || typeof travel !== 'object') {
+      throw new Error('缺少滚动窗口奔波负荷参数 travel（windowSeconds / distanceLimit）');
+    }
+    var W = Number(travel.windowSeconds);
+    var D = Number(travel.distanceLimit);
+    if (!isFinite(W) || !(W > 0)) {
+      throw new Error('滚动窗口时长 windowSeconds 必须为正数（0 < W ≤ 总时长 ' + T + ' 秒）');
+    }
+    if (W > T + TRAVEL_EPS) {
+      throw new Error('滚动窗口时长 windowSeconds 不能超过总时长 ' + T + ' 秒');
+    }
+    if (!isFinite(D) || D < 0) {
+      throw new Error('路程上限 distanceLimit 必须为非负数');
+    }
+    return { windowSeconds: Math.min(W, T), distanceLimit: D };
+  }
+
+  /**
+   * 计算一位表演者全部滑动窗口的奔波路程并给出严格超限的起点范围。
+   * performer 与 analyzePair 入参同形（关键帧 r 缺省继承 radius；路程
+   * 只取决于圆心轨迹，半径不参与计算）。
+   * 返回 {
+   *   performerId, performerName, windowSeconds, distanceLimit,
+   *   ranges: [{ start, end, maxDistance, maxStart }],  // 合并后的超限起点范围（按起点升序）
+   *   overloaded,        // ranges 是否非空
+   *   maxDistance,       // 所有完整窗口中的最大路程（不论是否超限）
+   *   maxStart,          // 最大路程的最早窗口起点
+   *   totalDistance      // 全程（起点 0 的窗口；W=T 时即全程总路程）
+   * }
+   */
+  function analyzePerformerTravel(performer, duration, travel) {
+    var durationNum = Number(duration);
+    if (!(durationNum > 0)) throw new Error('duration 必须为正数');
+    var cfg = normalizeTravel(travel, durationNum);
+    var W = cfg.windowSeconds;
+    var D = cfg.distanceLimit;
+    var baseR = Math.max(0, Number(performer.radius) || 0);
+    var segs = buildSegments(performer.keys, durationNum, baseR);
+    var smax = durationNum - W; // 窗口起点域 [0, smax]
+
+    // 每段 speed 与窗口重叠时长 overlap_i(s) = clamp(s+W,t0,t1) − clamp(s,t0,t1)
+    // 关于 s 连续分段线性，折点只在 t0、t1（窗口左沿越过段端点）与
+    // t0−W、t1−W（窗口右沿越过段端点）；F(s) 的折点为它们的并集。
+    var knots = [0, smax];
+    segs.forEach(function (s) {
+      [s.t0, s.t1, s.t0 - W, s.t1 - W].forEach(function (t) {
+        if (t > 0 + TRAVEL_EPS && t < smax - TRAVEL_EPS) knots.push(t);
+      });
+    });
+    knots.sort(function (a, b) { return a - b; });
+    var breaks = [];
+    knots.forEach(function (t) {
+      var tb = clamp(t, 0, smax);
+      if (!breaks.length || tb - breaks[breaks.length - 1] > TRAVEL_EPS) breaks.push(tb);
+    });
+
+    function windowDistance(s) {
+      var we = s + W;
+      var total = 0;
+      for (var i = 0; i < segs.length; i++) {
+        var sg = segs[i];
+        var lo = s > sg.t0 ? s : sg.t0;
+        var hi = we < sg.t1 ? we : sg.t1;
+        if (hi > lo) {
+          total += Math.sqrt(sg.vx * sg.vx + sg.vy * sg.vy) * (hi - lo);
+        }
+      }
+      return total;
+    }
+
+    function strictOver(v) {
+      // 严格大于：与时刻/路程尺度成比例的浮点容差内视为相等，不误报
+      return v > D + TRAVEL_EPS * Math.max(1, Math.abs(D));
+    }
+
+    var fvals = breaks.map(windowDistance);
+    var raw = [];
+    for (var i = 0; i < breaks.length - 1; i++) {
+      var a = breaks[i];
+      var b = breaks[i + 1];
+      var fa = fvals[i];
+      var fb = fvals[i + 1];
+      if (b - a <= TRAVEL_EPS) continue;
+      var flat = Math.abs(fb - fa) <= TRAVEL_EPS * Math.max(1, Math.abs(fa), Math.abs(fb));
+      if (flat) {
+        if (strictOver(fa)) raw.push([a, b]); // 平台段：整段同为超限/不超限
+        continue;
+      }
+      // 线性求根 F(s) = D：s* = a + (D − fa)·(b − a)/(fb − fa)
+      var root = clamp(a + (D - fa) * (b - a) / (fb - fa), a, b);
+      if (fa < fb) {
+        // 单调增：仅右端可能超限，超限部分为 (root, b]（root 处恰为 D，
+        // 与相接超限范围合并后按闭区间呈现，与其它分析口径一致）；root
+        // 已落在右端点 b 时为恰等于 D 的单点，严格语义下不计
+        if (strictOver(fb) && root < b - TRAVEL_EPS) raw.push([strictOver(fa) ? a : root, b]);
+      } else {
+        // 单调减：仅左端可能超限，超限部分为 [a, root)；root 已落在左端点
+        // a 时为恰等于 D 的单点，严格语义下不计
+        if (strictOver(fa) && root > a + TRAVEL_EPS) raw.push([a, strictOver(fb) ? b : root]);
+      }
+    }
+    if (breaks.length === 1 && strictOver(fvals[0])) {
+      raw.push([breaks[0], breaks[0]]); // W = T：起点域只有 {0}
+    }
+
+    // 相邻超限范围相接（折点处恰为 D）自动合并；零长度点（W=T）保留
+    var merged = mergeIntervals(raw);
+
+    // 合并后的范围可横跨若干折点：F 在范围上的最大值可能落在内部折点
+    // （帐篷形峰值），故枚举范围内的全部断点求最大，并取最早达到的起点
+    function maxOnRange(a, b) {
+      var cands = [a, b];
+      breaks.forEach(function (t) {
+        if (t > a + TRAVEL_EPS && t < b - TRAVEL_EPS) cands.push(t);
+      });
+      var maxDistance = -Infinity;
+      var maxStart = a;
+      cands.forEach(function (s) {
+        var v = windowDistance(s);
+        if (v > maxDistance + TRAVEL_EPS * Math.max(1, Math.abs(v))) {
+          maxDistance = v;
+          maxStart = s;
+        }
+      });
+      return { maxDistance: maxDistance, maxStart: maxStart };
+    }
+
+    var ranges = merged.map(function (iv) {
+      var peak = maxOnRange(iv[0], iv[1]);
+      return { start: iv[0], end: iv[1], maxDistance: peak.maxDistance, maxStart: peak.maxStart };
+    });
+
+    var maxDistance = 0;
+    var maxStart = breaks.length ? breaks[0] : 0;
+    fvals.forEach(function (v, idx) {
+      if (v > maxDistance + TRAVEL_EPS * Math.max(1, Math.abs(v))) {
+        maxDistance = v;
+        maxStart = breaks[idx];
+      }
+    });
+
+    return {
+      performerId: performer.id,
+      performerName: performer.name || performer.id,
+      windowSeconds: W,
+      distanceLimit: D,
+      ranges: ranges,
+      overloaded: ranges.length > 0,
+      maxDistance: maxDistance,
+      maxStart: maxStart,
+      totalDistance: windowDistance(0)
+    };
+  }
+
+  /**
+   * 场景级滚动窗口奔波负荷分析。cfg 为 normalizeTravel 规整后的参数。
+   * travelResults 按场景内表演者次序给出；另附场景级最大路程、其最早
+   * 起点与当事人（performers 为空时对应字段为 null）。
+   */
+  function analyzeTravel(scene, cfg) {
+    var duration = Number(scene.duration);
+    if (!(duration > 0)) throw new Error('duration 必须为正数');
+    var ps = scene.performers || [];
+    var travelResults = ps.map(function (p) {
+      return analyzePerformerTravel(p, duration, cfg);
+    });
+    var worst = null;
+    travelResults.forEach(function (r) {
+      if (!worst || r.maxDistance > worst.maxDistance + TRAVEL_EPS * Math.max(1, r.maxDistance)) {
+        worst = r;
+      }
+    });
+    return {
+      config: { windowSeconds: cfg.windowSeconds, distanceLimit: cfg.distanceLimit },
+      travelResults: travelResults,
+      maxDistance: worst ? worst.maxDistance : null,
+      maxStart: worst ? worst.maxStart : null,
+      maxDistancePerformerId: worst ? worst.performerId : null,
+      maxDistancePerformerName: worst ? worst.performerName : null
+    };
+  }
+
+  /** 查询窗口起点 s 是否落在某表演者的超限范围内（供时间轴/行高亮）。 */
+  function isTravelOverAt(result, s) {
+    if (!result || !result.ranges) return false;
+    for (var i = 0; i < result.ranges.length; i++) {
+      var rg = result.ranges[i];
+      if (s + TRAVEL_EPS >= rg.start && s - TRAVEL_EPS <= rg.end) return true;
+    }
+    return false;
+  }
+
   // ---------- 方案快照：两场景对比 ----------
 
   var DIFF_EPS = 1e-6;   // 区间端点"时间变化"判定容差（秒）
@@ -1887,11 +2130,16 @@
    *  - 另附一个**区域限员**：中央限员区（与交接区同框，语义不同）上限
    *    1 人；甲、乙圆心同时在内部的约 [5.18, 6.82] 为唯一超员段，
    *    峰值 2 人，丙、丁从不进入。
+   *  - 另附一组**滚动窗口奔波负荷**：W=4s、D=500。甲/乙全程匀速
+   *    （约 73.3/43.3 单位每秒），任取 4 s 窗口路程约 293/173：甲每个
+   *    窗口都超限、乙全程不超限；丙、丁为两折点折线（各折段速度不同），
+   *    最大 4 s 路程约 486.5，也不超限——演示按关键帧断点精确求范围。
    */
   function builtinScene() {
     return {
       duration: 12,
       world: { width: 1000, height: 600 },
+      travel: { windowSeconds: 4, distanceLimit: 500 },
       obstacles: [
         { id: 'o1', name: '中央禁入区', x: 440, y: 240, width: 120, height: 120 }
       ],
@@ -1995,6 +2243,10 @@
     isCapacityOverAt: isCapacityOverAt,
     buildRiskTimeline: buildRiskTimeline,
     isRiskSegmentActive: isRiskSegmentActive,
+    normalizeTravel: normalizeTravel,
+    analyzePerformerTravel: analyzePerformerTravel,
+    analyzeTravel: analyzeTravel,
+    isTravelOverAt: isTravelOverAt,
     compareScenes: compareScenes,
     builtinScene: builtinScene
   };

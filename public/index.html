@@ -175,6 +175,31 @@
         </div>
       </div>
 
+      <div class="panel panel-travel" id="panel-travel">
+        <div class="panel-head">
+          <span>奔波负荷（滚动窗口路程）</span>
+        </div>
+        <div class="travel-params">
+          <label class="travel-param">
+            窗口时长 W
+            <input id="travel-window" type="number" min="0.1" step="0.5" /> s
+          </label>
+          <label class="travel-param">
+            路程上限 D
+            <input id="travel-distance" type="number" min="0" step="10" />
+          </label>
+          <span id="travel-error" class="travel-error" hidden></span>
+        </div>
+        <div id="travel-list" class="travel-list"></div>
+        <div class="cue-hint">
+          窗口起点在全程<strong>连续滑动</strong>（非固定步长）：按关键帧时刻及其前移 W 秒的断点，
+          精确求每位表演者每个完整 W 秒窗口的<strong>实际行进路程</strong>（首尾停驻不计），
+          列出路程<strong>严格超过</strong> D 的窗口起点范围（相接段合并；恰等于 D 不违规；
+          W＝总时长时只查起点 0）。<strong>点击范围或最大路程跳到对应窗口起点</strong>；
+          修改参数或走位后即时刷新，参数随方案快照保存。
+        </div>
+      </div>
+
       <div class="panel panel-snapshots">
         <div class="panel-head">
           <span id="snap-head">方案快照（0/8 · 存于本机浏览器）</span>

@@ -24,6 +24,7 @@
     obstacles: [],
     handoffs: [],
     capacityZones: [],
+    travel: null,           // {windowSeconds, distanceLimit} 滚动窗口奔波负荷参数
     selectedPid: null,
     selectedKey: null,      // {pid, index}
     selectedObstacleId: null,
@@ -116,6 +117,11 @@
       z.height = Math.round(z.height);
       return z;
     });
+    // 滚动窗口奔波负荷参数：随快照保存；旧快照缺省时取全程窗口（D=0 不掩盖问题）
+    state.travel = normalizeTravelInput(scene.travel, state.duration, {
+      windowSeconds: state.duration,
+      distanceLimit: 0
+    });
     state.selectedPid = state.performers[0] ? state.performers[0].id : null;
     state.selectedKey = null;
     state.selectedObstacleId = null;
@@ -126,6 +132,8 @@
     state.time = opts.keepTime ? Math.min(state.time, state.duration) : 0;
     state.playing = false;
     document.getElementById('duration-input').value = state.duration;
+    renderTravelParams();
+    clearTravelError();
     recompute();
     renderPerformers();
     renderZones();
@@ -159,7 +167,8 @@
       performers: state.performers,
       obstacles: state.obstacles,
       handoffs: state.handoffs,
-      capacityZones: state.capacityZones
+      capacityZones: state.capacityZones,
+      travel: state.travel
     });
     renderSummary();
     renderPairs();
@@ -167,6 +176,7 @@
     renderCueResults();
     renderHandoffResults();
     renderZoneResults();
+    renderTravelResults();
     renderRiskTimeline();
     renderTimelineDanger();
     updatePlayhead();
@@ -1633,6 +1643,174 @@
     addZoneDefault();
   });
 
+  // ---------- 滚动窗口奔波负荷面板 ----------
+  var travelListEl = document.getElementById('travel-list');
+  var travelWindowInput = document.getElementById('travel-window');
+  var travelDistanceInput = document.getElementById('travel-distance');
+  var travelErrorEl = document.getElementById('travel-error');
+
+  /**
+   * 规整界面侧的奔波参数输入：raw 缺省/非法时回退 fallback（载入旧快照用）；
+   * 字段显式非法时抛错（由调用方展示错误，不覆盖界面中的有效设置）。
+   */
+  function normalizeTravelInput(raw, duration, fallback) {
+    var src = raw;
+    if (!src || typeof src !== 'object') src = fallback || {};
+    var W = src.windowSeconds === undefined || src.windowSeconds === null || src.windowSeconds === ''
+      ? (fallback ? fallback.windowSeconds : duration)
+      : Number(src.windowSeconds);
+    var D = src.distanceLimit === undefined || src.distanceLimit === null || src.distanceLimit === ''
+      ? (fallback ? fallback.distanceLimit : 0)
+      : Number(src.distanceLimit);
+    if (!isFinite(W) || !(W > 0)) {
+      throw new Error('窗口时长 W 必须为正数（0 < W ≤ 总时长 ' + duration + ' 秒）');
+    }
+    if (W > duration + 1e-6) {
+      throw new Error('窗口时长 W 不能超过总时长 ' + duration + ' 秒');
+    }
+    if (!isFinite(D) || D < 0) {
+      throw new Error('路程上限 D 必须为非负数');
+    }
+    return { windowSeconds: Math.min(W, duration), distanceLimit: D };
+  }
+
+  function showTravelError(msg) {
+    travelErrorEl.hidden = false;
+    travelErrorEl.textContent = msg;
+  }
+  function clearTravelError() {
+    travelErrorEl.hidden = true;
+    travelErrorEl.textContent = '';
+  }
+  function renderTravelParams() {
+    if (!state.travel) return;
+    travelWindowInput.value = Math.round(state.travel.windowSeconds * 100) / 100;
+    travelDistanceInput.value = Math.round(state.travel.distanceLimit * 100) / 100;
+    travelWindowInput.max = state.duration;
+  }
+
+  function commitTravelField(field, input) {
+    var raw = input.value;
+    if (raw === '') {
+      // 中间态：回退显示当前有效值，不覆盖
+      renderTravelParams();
+      return;
+    }
+    var candidate = {
+      windowSeconds: state.travel.windowSeconds,
+      distanceLimit: state.travel.distanceLimit
+    };
+    candidate[field] = Number(raw);
+    var cfg;
+    try {
+      cfg = normalizeTravelInput(candidate, state.duration);
+    } catch (err) {
+      // 非法输入：清晰报错并回退输入框，不覆盖 state 中的有效设置
+      showTravelError(err.message);
+      renderTravelParams();
+      return;
+    }
+    clearTravelError();
+    state.travel = cfg;
+    recompute();
+    renderTimelineStatic();
+    draw();
+  }
+
+  travelWindowInput.addEventListener('change', function () {
+    commitTravelField('windowSeconds', travelWindowInput);
+  });
+  travelDistanceInput.addEventListener('change', function () {
+    commitTravelField('distanceLimit', travelDistanceInput);
+  });
+
+  function travelResultByPid(pid) {
+    if (!state.analysis || !state.analysis.travel) return null;
+    return state.analysis.travel.travelResults.find(function (r) { return r.performerId === pid; }) || null;
+  }
+
+  function travelResultHtml(p, res) {
+    if (!res) return '<span class="zone-warn">—</span>';
+    var fullWindow = Math.abs(res.windowSeconds - state.duration) <= 1e-6;
+    var html = '<div class="travel-result-line travel-max">全部窗口最大路程 <b>' +
+      fmt(res.maxDistance) + '</b>（起点 <span class="travel-chip travel-chipmax t-jump" data-t="' +
+      res.maxStart + '" title="点击跳转播放头到最大路程窗口起点 ' + fmt(res.maxStart) + ' s">' +
+      fmt(res.maxStart) + ' s</span>）· 上限 ' + fmt(res.distanceLimit) +
+      (fullWindow ? ' · W＝总时长，仅起点 0 一个窗口' : '') + '</div>';
+    if (!res.overloaded) {
+      html += '<div class="travel-result-line"><span class="zone-ok">全程窗口均未超限</span></div>';
+      return html;
+    }
+    html += '<div class="travel-result-line">严格超限的窗口起点 ' + res.ranges.length + ' 段：</div>';
+    res.ranges.forEach(function (rg) {
+      html += '<div class="travel-result-line">' +
+        '<span class="travel-chip t-jump" data-t="' + rg.start +
+        '" title="点击跳转播放头到该范围起点 ' + fmt(rg.start) + ' s">' +
+        fmt(rg.start) + '–' + fmt(rg.end) + ' s</span>' +
+        '范围最大路程 <b>' + fmt(rg.maxDistance) + '</b>' +
+        '（最早起点 <span class="travel-chip travel-chipmax t-jump" data-t="' + rg.maxStart +
+        '" title="点击跳转播放头到范围最大路程起点 ' + fmt(rg.maxStart) + ' s">' +
+        fmt(rg.maxStart) + ' s</span>）</div>';
+    });
+    return html;
+  }
+
+  // 高频重算只更新结果文本，不重建参数输入框（避免打断编辑）
+  function renderTravelResults() {
+    if (!state.analysis || !state.analysis.travel) return;
+    Array.prototype.forEach.call(travelListEl.children, function (row) {
+      var res = travelResultByPid(row.dataset.pid);
+      var p = getPerformer(row.dataset.pid);
+      if (!res) return;
+      row.querySelector('.travel-result').innerHTML = travelResultHtml(p, res);
+      row.classList.toggle('over', res.overloaded);
+      var status = row.querySelector('.travel-status');
+      status.innerHTML = res.overloaded
+        ? '<b>' + res.ranges.length + ' 段超限</b>'
+        : '<b>未超限</b>';
+    });
+    updateTravelActive(state.time);
+  }
+
+  function renderTravelList() {
+    travelListEl.innerHTML = '';
+    state.performers.forEach(function (p) {
+      var row = document.createElement('div');
+      row.className = 'travel-row';
+      row.dataset.pid = p.id;
+      var head = document.createElement('div');
+      head.className = 'travel-row-head';
+      head.innerHTML =
+        '<span class="mini-dot" style="background:' + p.color + '"></span>' +
+        '<span class="travel-name">' + escapeHtml(p.name) + '</span>' +
+        '<span class="travel-status"></span>';
+      row.appendChild(head);
+      var result = document.createElement('div');
+      result.className = 'travel-result';
+      row.appendChild(result);
+      travelListEl.appendChild(row);
+    });
+    renderTravelResults();
+  }
+
+  // 播放头移动时高亮当前窗口起点落入超限范围的行
+  function updateTravelActive(t) {
+    if (!state.analysis || !state.analysis.travel) return;
+    Array.prototype.forEach.call(travelListEl.children, function (row) {
+      var res = travelResultByPid(row.dataset.pid);
+      row.classList.toggle('active-now', !!res && Core.isTravelOverAt(res, t));
+    });
+  }
+
+  // 点击范围/最大路程芯片：播放头跳到对应窗口起点
+  travelListEl.addEventListener('click', function (e) {
+    var el = e.target && typeof e.target.closest === 'function'
+      ? e.target.closest('.t-jump') : null;
+    if (!el || !travelListEl.contains(el)) return;
+    var t = Number(el.getAttribute('data-t'));
+    if (isFinite(t)) seek(t);
+  });
+
   // ---------- 画布绘制 ----------
   function draw() {
     ctx.clearRect(0, 0, WORLD_W, WORLD_H);
@@ -1700,6 +1878,7 @@
     renderZoneEditor();
     updateObstacleResultActive(t);
     updateRiskTimelineActive(t);
+    updateTravelActive(t);
   }
 
   function drawGrid() {
@@ -2226,6 +2405,7 @@
     renderCues();
     renderHandoffs();
     renderZones();
+    renderTravelList();
   }
 
   function addPerformer() {
@@ -2657,6 +2837,30 @@
         lane.appendChild(bar);
       });
     });
+
+    // 奔波负荷：当事人泳道底部叠加紫色条表示"超限窗口起点范围"（点击跳到范围起点）
+    if (state.analysis.travel) {
+      state.analysis.travel.travelResults.forEach(function (res) {
+        if (!res.overloaded) return;
+        var lane = lanesEl.querySelector('.tl-lane[data-pid="' + res.performerId + '"]');
+        if (!lane) return;
+        res.ranges.forEach(function (rg) {
+          var bar = document.createElement('div');
+          bar.className = 'tl-danger tl-travel';
+          bar.style.left = tToX(rg.start, lw) + 'px';
+          bar.style.width = Math.max(2, tToX(Math.max(rg.end - rg.start, 1e-6), lw)) + 'px';
+          bar.title = res.performerName + ' 奔波超限（' +
+            fmt(state.analysis.travel.config.windowSeconds) + ' s 窗口路程 > ' +
+            fmt(state.analysis.travel.config.distanceLimit) + '）起点范围 ' +
+            rg.start.toFixed(2) + '–' + rg.end.toFixed(2) + 's（点击跳到范围起点）';
+          bar.addEventListener('click', function (e) {
+            e.stopPropagation();
+            seek(rg.start);
+          });
+          lane.appendChild(bar);
+        });
+      });
+    }
   }
 
   // 时间轴：拖动时刻柄 / 点击定位播放头
@@ -2810,6 +3014,14 @@
     });
     state.time = Math.min(state.time, d);
     document.getElementById('duration-readout').textContent = d.toFixed(1);
+    // 奔波窗口时长不得超过新总时长：钳到 d 并提示（保持有效设置，不产生非法状态）
+    if (state.travel && state.travel.windowSeconds > d) {
+      state.travel = { windowSeconds: d, distanceLimit: state.travel.distanceLimit };
+      showTravelError('总时长缩短，窗口时长已自动钳为 ' + d + ' 秒');
+    } else {
+      clearTravelError();
+    }
+    renderTravelParams();
     recompute();
     renderCues();
     renderTimelineStatic();
@@ -2861,14 +3073,15 @@
   var snapStatusEl = document.getElementById('snap-status');
   var snapStatusTimer = null;
 
-  // 深拷贝当前场景（状态中的 performer/obstacle/handoff/zone 均为纯数据）
+  // 深拷贝当前场景（状态中的 performer/obstacle/handoff/zone/travel 均为纯数据）
   function serializeScene() {
     return JSON.parse(JSON.stringify({
       duration: state.duration,
       performers: state.performers,
       obstacles: state.obstacles,
       handoffs: state.handoffs,
-      capacityZones: state.capacityZones
+      capacityZones: state.capacityZones,
+      travel: state.travel
     }));
   }
 

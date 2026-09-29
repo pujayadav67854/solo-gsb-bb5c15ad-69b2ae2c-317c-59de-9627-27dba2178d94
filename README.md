@@ -36,9 +36,14 @@
 关键帧线性插值后的**最大位置偏移及发生时刻**，以及碰撞对与禁入区间的**新增、消失与时间
 变化**，点击任一结果时刻即跳转播放头；编辑场景后对比立即刷新。内置一组路径十字交叉 / 错峰 / 跟进贴近 / 到位展开道具、且中央放置一个
 禁入矩形的样例，并为甲/乙附带**触发 / 错过时窗 / 前序未完成**三态的入场口令样例，
-一项甲×乙中央**道具交接**样例（触达 80、最短持续 0.5 s，可交接区间约 [5.18, 6.82]、
+三项甲×乙中央**道具交接**样例（触达 80、最短持续 0.5 s，可交接区间约 [5.18, 6.82]、
 起始时窗约 [5.18, 6.32]），以及一个中央**区域限员**样例（上限 1 人，约 [5.18, 6.82]
-超员、峰值 2 人）。
+超员、峰值 2 人）。右侧还提供**滚动窗口奔波负荷**分析：设置窗口时长 W（0<W≤总时长）
+与路程上限 D（D≥0），窗口起点在全程连续滑动，按关键帧时刻及其前移 W 秒形成的断点
+精确求每人每个完整 W 秒窗口的实际行进路程（首尾停驻不计），列出路程**严格超过 D**
+的窗口起点范围、每段最大路程及最早起点，并给全程最大路程；恰等于 D 不违规，相接段
+合并，W＝总时长时只检查起点 0。内置样例以 W=4 s、D=500 演示（甲/乙匀速不超限、
+丙折线存在约 0–4.93 s 的超限起点范围）。
 
 ## 一条命令启动（Docker Compose）
 
@@ -147,6 +152,21 @@ npm start
   **点击任意段（或其时刻）即把播放头跳到该段起点**并刷新画布；播放/拖动播放头时当前
   生效的段实时高亮（同一时刻至多一段）。拖动走位点、修改半径、增删/编辑禁入区或限员
   区后，时间轴随碰撞等结果**实时刷新**；`POST /api/analyze` 在 `riskTimeline` 字段返回
+  同一份结果（见下文 HTTP 接口）。
+- **奔波负荷（滚动窗口路程）**：右侧"**奔波负荷（滚动窗口路程）**"面板设置**窗口时长 W**
+  （0 < W ≤ 总时长，秒）与**路程上限 D**（≥ 0，世界单位）。窗口起点 s 在
+  **[0, 总时长−W] 上连续滑动**（不是固定步长采样）：以关键帧时刻及其**前移 W 秒**
+  形成的断点把起点轴切成若干区间，区间内窗口路程关于 s 线性，用线性求根**精确**给出
+  路程 **F(s) 严格大于 D** 的起点范围，相接范围自动合并。面板逐人列出：**全部窗口
+  最大路程及其最早窗口起点**（可点击跳转）、每个**严格超限起点范围** [起, 止]、该范围内
+  **最大路程及其最早起点**（均可点击跳转到对应窗口起点），行在有超限时红边标记，播放头
+  落入超限起点范围时整行高亮；时间轴对应泳道底部叠加紫色超限范围条（点击跳到范围起点）。
+  **首尾停驻不计路程**（静止段速度为 0），**恰等于 D 不违规**；**W 等于总时长时只检查
+  起点 0**（提示"仅起点 0 一个窗口"，超限给出 0–0 s 的单点范围）。修改 W / D 或拖动走位、
+  关键帧时刻后**立即刷新**；非法输入（W ≤ 0、W > 总时长、D < 0、非数字）在面板内给出
+  **清晰错误**并把输入框**回退为当前有效值，不覆盖既有有效设置**；缩短总时长使 W 越界时
+  自动把 W 钳为新总时长并提示。参数随**方案快照保存/载入**（旧快照缺省该字段时回退为
+  W＝总时长、D＝0，不报错）；`POST /api/analyze` 在 `travel` / `travelResults` 字段返回
   同一份结果（见下文 HTTP 接口）。
 
 ## 方案快照（两方案对比）
@@ -363,6 +383,33 @@ q_x(t)^2+q_y(t)^2 \le (c+d\,t)^2
 整段合成只在端点事件上做归并，无离散帧抽样；实现位于 `public/core.js` 的
 `buildRiskTimeline`，浏览器侧栏与 `POST /api/analyze`（`riskTimeline` 字段）共用同一份。
 
+### 滚动窗口奔波负荷：分段线性窗口路程的断点求根
+
+参数 `{ windowSeconds: W, distanceLimit: D }`（0 < W ≤ 总时长 T、D ≥ 0）。把每位表演者
+沿 `buildSegments` 展开为活动段，每段圆心速度大小 \(v_i=\lVert\mathbf v_i\rVert\) 恒定
+（首尾停驻段速度为 0，天然不计路程）。窗口 \([s, s+W]\) 在该段上的重叠时长为
+
+\[
+o_i(s)=\min(s+W,t_{i+1})-\max(s,t_i)\quad(\text{钳到 }[t_i,t_{i+1}])
+\]
+
+窗口实际行进路程为各段贡献之和：
+
+\[
+F(s)=\sum_i v_i\,o_i(s),\qquad s\in[0,\,T-W]
+\]
+
+每个 \(o_i(s)\) 是关于 s 的分段线性函数，折点只可能出现在窗口左沿越过段端点
+（\(t_i\)、\(t_{i+1}\)）或窗口右沿越过段端点（\(t_i-W\)、\(t_{i+1}-W\)）的时刻。
+枚举全部折点（含 0 与 T−W，去重并钳入起点域），则 **F(s) 在相邻断点之间斜率恒定**：
+线性求根 \(F(s)=D\) 即可精确判定该小区间内 F>D（**严格大于**，数值容差内相等不算）的
+部分；各小区间解出的超限范围再经同一 `mergeIntervals` 做**相接段合并**（折点处恰为 D
+的两段并为一段），范围在合并后可能横跨多个折点（帐篷形峰值），故范围最大路程在范围
+端点与其内部全部折点上取最大、并取最早达到的起点。全程最大路程同理在断点并集上取。
+W = T 时起点域退化为单点 {0}，只检查起点 0（超限给出零长度单点范围）。全程无固定步长
+采样；实现位于 `public/core.js` 的 `normalizeTravel` / `analyzePerformerTravel` /
+`analyzeTravel`，浏览器侧栏与 `POST /api/analyze` 共用同一份。
+
 ### 方案快照对比
 
 `compareScenes(sceneA, sceneB)` 在统一时刻轴 `[0, max(dA,dB)]` 上对比两版场景：
@@ -383,7 +430,8 @@ q_x(t)^2+q_y(t)^2 \le (c+d\,t)^2
 
 - `GET /api/sample` — 返回内置样例场景（含关键帧半径 `r`，如丙 t=8 帧 `r: 60` 表现展开道具；
   另含中央禁入矩形 `obstacles`，甲 3 条 / 乙 1 条入场口令 `cues`，以及一项甲×乙中央
-  道具交接 `handoffs`，以及一个中央区域限员 `capacityZones`）
+  道具交接 `handoffs`，以及一个中央区域限员 `capacityZones`，以及滚动窗口奔波负荷参数
+  `travel: { windowSeconds: 4, distanceLimit: 500 }`）
 - `POST /api/analyze` — 入参
   `{ "duration": 12, "performers": [{ "name": "甲", "radius": 20, "keys": [{"t":0,"x":60,"y":300}, {"t":8,"x":500,"y":300,"r":60}],
   "cues": [{"x":440,"y":240,"width":120,"height":120,"winStart":4,"winEnd":6}] }],
@@ -406,6 +454,10 @@ q_x(t)^2+q_y(t)^2 \le (c+d\,t)^2
   `{id?, name?, x, y, width, height, limit}`：`width/height` 非负（0 宽/高的退化区域
   没有内部，永不统计），`limit` 必须为**正整数**（请求中小数报 400；引擎规整时非正数项
   丢弃），缺省 `id` 自动补 `z<随机串>`、缺省 name 补"限员区 N"。
+  `travel` 为滚动窗口奔波负荷参数，**可整体缺省（旧请求完全兼容，返回 `travel: null`）**，
+  形如 `{ windowSeconds: W, distanceLimit: D }`：`windowSeconds` 必须为满足
+  **0 < W ≤ duration** 的有限数（缺失、非数字、≤0 或超过总时长均报 400 并给出清晰说明），
+  `distanceLimit` 必须为**非负有限数**（缺失、非数字或负数报 400）。
   返回每对碰撞区间（含 `radiusSumMin` / `radiusSumMax` 半径和变化范围）、**最小安全余量
   `minMargin` 及发生时刻 `minMarginT`**（`distance(t) − (rA+rB)` 的连续全局最小值），
   `pairs` 按余量由小到大排序；场景级另附 `minMargin` / `minMarginT` / `minMarginPair`、
@@ -452,11 +504,66 @@ q_x(t)^2+q_y(t)^2 \le (c+d\,t)^2
   同刻开始与结束已统一结算，零长度区间（相切点/瞬时触角）不出现在结果中，生效来源
   或涉及人员变化处即段边界；无任何风险时为 `[]`。
 
+  滚动窗口奔波负荷方面返回 `travel`（旧请求缺省 `travel` 入参时为 `null`）：
+  `{ config:{windowSeconds, distanceLimit}, travelResults, maxDistance, maxStart,
+  maxDistancePerformerId, maxDistancePerformerName }`，其中 `travelResults` 按场景内
+  表演者次序逐人给出
+  `{ performerId, performerName, windowSeconds, distanceLimit, ranges, overloaded,
+  maxDistance, maxStart, totalDistance }`：
+  - `ranges` 为路程**严格超过** D 的窗口起点范围（相接段已合并），每段形如
+    `{ start, end, maxDistance, maxStart }`——`[start,end]` 是超限**窗口起点**的范围
+    （对应窗口为 `[start, start+W]`～`[end, end+W]`），`maxDistance/maxStart` 为该范围
+    内（含内部折点峰值）的最大窗口路程及其最早窗口起点；W＝总时长且超限时为单点
+    `{start:0,end:0,...}`；
+  - `overloaded` 为 `ranges` 是否非空；
+  - `maxDistance/maxStart` 为**所有完整窗口**（不论是否超限）中的最大路程及其最早起点；
+  - `totalDistance` 为起点 0 的窗口路程（W＝总时长时即全程总路程）；
+  - 场景级 `maxDistance/maxStart/maxDistancePerformerId/maxDistancePerformerName` 汇总
+    全员中的最大窗口路程（无表演者时为 `null`）。
+
   响应额外携带 `scene`，其中缺省半径已解析为具体数值、矩形已规整、每位表演者的 `cues`
-  与场景级 `handoffs`、`capacityZones` 已经过同样规整，可直接回传。旧的无 `r`、无
-  `obstacles`、无 `cues`、无 `handoffs`、无 `capacityZones` 场景数据完全兼容
+  与场景级 `handoffs`、`capacityZones`、`travel`（合法时为规整后的参数，缺省时为 `null`）
+  已经过同样规整，可直接回传。旧的无 `r`、无 `obstacles`、无 `cues`、无 `handoffs`、
+  无 `capacityZones`、无 `travel` 场景数据完全兼容
   （前端实时编辑走本地同一引擎，此接口用于集成/校验）
 - `GET /healthz` — 健康检查
+
+### HTTP 调用示例（curl）
+
+携带滚动窗口奔波负荷参数 `travel`（缺省该字段的旧请求保持原有分析行为，返回 `travel: null`）：
+
+```bash
+curl -s -X POST http://localhost:3000/api/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "duration": 10,
+    "performers": [
+      {"id":"a","name":"甲","radius":0,"keys":[{"t":0,"x":0,"y":0},{"t":10,"x":1000,"y":0}]},
+      {"id":"b","name":"乙","radius":0,"keys":[{"t":0,"x":0,"y":0},{"t":10,"x":100,"y":0}]}
+    ],
+    "travel": { "windowSeconds": 4, "distanceLimit": 200 }
+  }'
+```
+
+甲 100 单位/秒、乙 10 单位/秒：甲任意 4 s 窗口路程 400 > 200，`travelResults` 中甲
+`overloaded: true`、唯一超限起点范围 `{start:0,end:6,maxDistance:400,maxStart:0}`；
+乙路程 40 ≤ 200，`ranges` 为空。W 等于总时长时只检查起点 0：
+
+```bash
+# 合法：W=duration
+curl -s -X POST http://localhost:3000/api/analyze -H 'Content-Type: application/json' \
+  -d '{"duration":10,"performers":[
+    {"id":"a","name":"甲","radius":0,"keys":[{"t":0,"x":0,"y":0},{"t":10,"x":1000,"y":0}]},
+    {"id":"b","name":"乙","radius":0,"keys":[{"t":0,"x":0,"y":0},{"t":10,"x":100,"y":0}]}],
+    "travel":{"windowSeconds":10,"distanceLimit":500}}'
+# 非法参数：400 且 error 给出清晰说明（不执行分析）
+curl -s -X POST http://localhost:3000/api/analyze -H 'Content-Type: application/json' \
+  -d '{"duration":10,"performers":[
+    {"id":"a","name":"甲","radius":0,"keys":[{"t":0,"x":0,"y":0},{"t":10,"x":1000,"y":0}]},
+    {"id":"b","name":"乙","radius":0,"keys":[{"t":0,"x":0,"y":0},{"t":10,"x":100,"y":0}]}],
+    "travel":{"windowSeconds":12,"distanceLimit":500}}'
+# -> {"error":"滚动窗口时长 windowSeconds 不能超过总时长 10 秒"}
+```
 
 ## 测试
 
@@ -488,6 +595,13 @@ q_x(t)^2+q_y(t)^2 \le (c+d\,t)^2
 相接成两段、同刻开始/结束统一结算（零长度空窗/瞬时段）、同刻换人不插入零长度段、
 三类风险叠加合成分段、来源不变仅人员更换即分段、人员并集去重与场景次序、t=0/T
 边界成段、缺省参数兼容、内置样例段端点一致与 1000 点稠密采样逐点核对来源数与人员；
+**滚动窗口奔波负荷**（analyzePerformerTravel/analyzeTravel）的匀速平台全程超限/不超限、
+恰等于 D 不违规、首尾停驻不计、帐篷形 F(s) 两侧线性求根且相接段合并为一段、范围最大
+路程取内部折点峰值及最早起点、多折点不同速度范围相接合并、W=总时长只查起点 0（单点
+范围）、路程与安全半径无关、往返按实际折线长度、参数规整（合法/W=T/浮点钳制）与非法
+W（0/负/NaN/非数字/超总时长）及非法 D（负/NaN/缺字段/非对象）清晰报错、`analyzeScene`
+装配与旧场景无 `travel` 兼容、内置样例数值、40 组随机轨迹 ×多组 D 对 2000 点稠密扫描
+逐点核对超限归属、范围端点必为 F=D 的根、最大路程与断点枚举精确参照一致；
 **方案快照对比**（`compareScenes`）的相同场景零偏移、首帧平移最大偏移时刻、凸函数最大必在
 关键帧断点、碰撞对新增/消失/时间变化、禁入区间平移与改名、表演者增删、跨时长统一时刻轴；
 另有 jsdom 界面冒烟（拖动、编辑关键帧半径、清除继承、播放插值、**余量展示与点击跳转播放头**、
@@ -502,12 +616,17 @@ q_x(t)^2+q_y(t)^2 \le (c+d\,t)^2
 **风险叠加时间轴（三类来源合成、按时间排序且互不重叠、舍弃零长度段、同刻统一结算、
 来源/人员变化即分段、起止时刻与来源/人员渲染、点击段落跳转播放头、播放中当前段高亮、
 编辑走位或区域即时刷新、提高上限后超员来源消失）**、
+**奔波负荷面板（样例逐人渲染、超限红边与范围/最大路程芯片点击跳转、时间轴紫色范围条、
+改 D/W 即时刷新、非法 W（0/超总时长）与非法 D（负）清晰报错且回退不覆盖有效设置、
+W=总时长单点提示、拖走位即时刷新、播放头在超限范围时行高亮、参数随快照保存/载入恢复、
+旧快照缺省 travel 回退 W=总时长/D=0 不报错）**、
 **快照保存/同名覆盖/8 个上限/删除/载入/localStorage 持久化、编辑后立即刷新对比与结果时刻
 点击跳转**）
 与 HTTP 接口用例（含 `obstacles` 规整、排序、非法矩形 400、`cues` 三态返回、规整回传与
 非法口令 400、`handoffs` 区间/时窗返回、触达切割与持续不足、非法交接 400、
 `capacityZones` 超员段/名单/峰值返回、同刻进出不产生零长度段、非法 limit/尺寸 400、
-`riskTimeline` 三类来源合成/互不重叠/字段齐全、无风险为空、旧请求兼容）：
+`riskTimeline` 三类来源合成/互不重叠/字段齐全、无风险为空、`travel` 逐人范围/最大路程/
+W=总时长/恰等于上限不违规返回、非法 W/D 清晰 400、样例携带 travel、旧请求兼容）：
 
 ```bash
 npm test
@@ -522,17 +641,18 @@ npm test
 ├── package.json
 ├── server/index.js        # Express 静态托管 + /api/analyze（复用同一引擎）
 ├── public/
-│   ├── core.js            # 碰撞/禁入矩形/入场口令/道具交接/区域限员解析引擎 + 风险叠加时间轴 buildRiskTimeline + 方案快照对比 compareScenes（浏览器/Node 通用，零依赖）
+│   ├── core.js            # 碰撞/禁入矩形/入场口令/道具交接/区域限员/滚动窗口奔波负荷解析引擎 + 风险叠加时间轴 buildRiskTimeline + 方案快照对比 compareScenes（浏览器/Node 通用，零依赖）
 │   ├── index.html
 │   ├── styles.css
-│   └── app.js             # Canvas 渲染、拖拽编辑、关键帧半径、禁入矩形、入场口令、道具交接、区域限员、风险叠加时间轴侧栏、播放、时间轴、方案快照（localStorage）
+│   └── app.js             # Canvas 渲染、拖拽编辑、关键帧半径、禁入矩形、入场口令、道具交接、区域限员、奔波负荷面板、风险叠加时间轴侧栏、播放、时间轴、方案快照（localStorage）
 └── test/
     ├── core.test.js       # 引擎解析用例（固定 + 可变半径）
     ├── cues.test.js       # 入场口令引擎用例（严格进入、顺序匹配、三态、采样对照）
     ├── handoff.test.js    # 道具交接引擎用例（同处交接区+触达区间、起始时窗、采样对照）
     ├── capacity.test.js   # 区域限员引擎用例（严格内部统计、同刻进出、名单分段、峰值、采样对照）
     ├── risktimeline.test.js # 风险叠加时间轴引擎用例（三类合成、同刻结算、人员分段、采样对照）
+    ├── travel.test.js      # 滚动窗口奔波负荷引擎用例（断点线性求根、范围合并、严格超限、W=总时长、参数校验、采样对照）
     ├── snapshot.test.js   # 方案快照对比引擎用例（偏移最大、碰撞/禁入增删与时间变化）
-    ├── ui.smoke.test.js   # jsdom 界面冒烟（含禁入区、入场口令、道具交接、区域限员、快照面板）
+    ├── ui.smoke.test.js   # jsdom 界面冒烟（含禁入区、入场口令、道具交接、区域限员、奔波负荷、快照面板）
     └── api.test.js        # HTTP 接口用例
 ```

@@ -213,6 +213,86 @@ html, body {
 .zone-warn { color: #e3b341; }
 .zone-ok { color: #56d364; }
 
+/* 滚动窗口奔波负荷面板 */
+.panel-travel { font-variant-numeric: tabular-nums; }
+.travel-params {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 14px 4px;
+}
+.travel-param { font-size: 12px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 5px; }
+.travel-param input {
+  width: 72px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.travel-error {
+  flex-basis: 100%;
+  color: #ffb3ae;
+  background: rgba(248, 81, 73, .12);
+  border: 1px solid rgba(248, 81, 73, .4);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.travel-list { padding: 6px 10px; }
+.travel-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 7px;
+  background: var(--bg-panel-2);
+  border-left-width: 3px;
+  border-left-color: var(--ok);
+}
+.travel-row.over { border-left-color: var(--danger); }
+.travel-row.active-now { background: rgba(248, 81, 73, .1); }
+.travel-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.travel-name { color: var(--text); font-weight: 500; }
+.travel-status { margin-left: auto; font-size: 11px; }
+.travel-row.over .travel-status b { color: var(--danger); }
+.travel-row:not(.over) .travel-status b { color: var(--ok); }
+.travel-result { margin-top: 5px; font-size: 12px; color: var(--text-dim); }
+.travel-result-line { margin-top: 2px; line-height: 1.7; }
+.travel-max b { color: var(--text); }
+.travel-chip {
+  display: inline-block;
+  font-size: 11px;
+  background: var(--danger-bg);
+  border: 1px solid rgba(248, 81, 73, .45);
+  color: #ffb3ae;
+  border-radius: 4px;
+  padding: 0 5px;
+  margin: 1px 4px 1px 0;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.travel-chip:hover { background: rgba(248, 81, 73, .3); text-decoration-style: solid; }
+.travel-chipmax { background: rgba(167, 139, 250, .16); border-color: rgba(167, 139, 250, .5); color: #c4b5fd; }
+.travel-chipmax:hover { background: rgba(167, 139, 250, .3); }
+
+/* 时间轴奔波负荷超限范围条（紫色，叠加在危险条之上；点击跳到范围起点） */
+.tl-travel {
+  bottom: 1px;
+  top: auto;
+  height: 6px;
+  background: rgba(167, 139, 250, .32);
+  border-top: 1px solid rgba(167, 139, 250, .75);
+  border-bottom: 1px solid rgba(167, 139, 250, .75);
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 2;
+}
+.tl-travel:first-child { border-left: 1px solid rgba(167, 139, 250, .75); border-radius: 3px 0 0 3px; }
+
 /* 禁入区侵入结果行 */
 .obs-row {
   display: flex;
